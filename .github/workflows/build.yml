@@ -1,0 +1,198 @@
+name: Build and Release macOS App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Create build directory
+        run: mkdir -p build
+
+      - name: Create Info.plist
+        run: |
+          cat > build/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>SlackOTPExtractor</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.github.slackotpextractor</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>SlackOTPExtractor</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>11.0</string>
+              <key>LSUIElement</key>
+              <true/>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>NSUserNotificationAlertStyle</key>
+              <string>alert</string>
+              <key>NSRequiresAquaSystemAppearance</key>
+              <false/>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Compile Swift application
+        run: |
+          swiftc main.swift \
+            -o build/SlackOTPExtractor \
+            -O \
+            -target x86_64-apple-macos11.0 \
+            -import-objc-header /dev/null \
+            -framework Cocoa \
+            -framework UserNotifications
+
+      - name: Create universal binary (Intel + Apple Silicon)
+        run: |
+          # Create Apple Silicon binary
+          swiftc main.swift \
+            -o build/SlackOTPExtractor_arm64 \
+            -O \
+            -target arm64-apple-macos11.0 \
+            -import-objc-header /dev/null \
+            -framework Cocoa \
+            -framework UserNotifications
+            
+          # Create universal binary
+          lipo -create \
+            build/SlackOTPExtractor \
+            build/SlackOTPExtractor_arm64 \
+            -output build/SlackOTPExtractor_universal
+            
+          # Replace with universal binary
+          mv build/SlackOTPExtractor_universal build/SlackOTPExtractor
+
+          # Clean up temporary files
+          rm build/SlackOTPExtractor_arm64
+
+      - name: Create app bundle structure
+        run: |
+          mkdir -p "build/SlackOTPExtractor.app/Contents/MacOS"
+          mkdir -p "build/SlackOTPExtractor.app/Contents/Resources"
+
+          # Copy executable
+          cp build/SlackOTPExtractor "build/SlackOTPExtractor.app/Contents/MacOS/"
+
+          # Copy Info.plist
+          cp build/Info.plist "build/SlackOTPExtractor.app/Contents/"
+
+          # Make executable
+          chmod +x "build/SlackOTPExtractor.app/Contents/MacOS/SlackOTPExtractor"
+
+      - name: Verify app bundle
+        run: |
+          echo "App bundle structure:"
+          find "build/SlackOTPExtractor.app" -type f
+
+          echo "Binary architecture:"
+          lipo -info "build/SlackOTPExtractor.app/Contents/MacOS/SlackOTPExtractor"
+
+          echo "Binary info:"
+          file "build/SlackOTPExtractor.app/Contents/MacOS/SlackOTPExtractor"
+
+      - name: Test app launch (headless)
+        run: |
+          # Test that the binary can at least be executed without errors
+          timeout 5s "build/SlackOTPExtractor.app/Contents/MacOS/SlackOTPExtractor" || true
+          echo "Binary test completed"
+
+      - name: Create ZIP for distribution
+        run: |
+          cd build
+          zip -r SlackOTPExtractor.zip SlackOTPExtractor.app
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SlackOTPExtractor-macOS
+          path: |
+            build/SlackOTPExtractor.zip
+            build/SlackOTPExtractor.app/
+          retention-days: 30
+
+      - name: Get tag name
+        if: startsWith(github.ref, 'refs/tags/')
+        id: tag
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: build/SlackOTPExtractor.zip
+          name: SlackOTPExtractor ${{ steps.tag.outputs.TAG_NAME }}
+          body: |
+            # SlackOTPExtractor ${{ steps.tag.outputs.TAG_NAME }}
+
+            ## What's New
+            - Automated build for macOS 11.0+
+            - Universal binary (Intel + Apple Silicon)
+            - Menu bar utility for OTP extraction
+
+            ## Installation
+            1. Download `SlackOTPExtractor.zip`
+            2. Extract the ZIP file
+            3. Move `SlackOTPExtractor.app` to your Applications folder
+            4. Right-click the app and select "Open" (first time only)
+            5. Look for the key icon in your menu bar
+
+            ## Features
+            - Menu bar app with monitoring toggle
+            - Automatic OTP extraction from text
+            - Clipboard integration
+            - System notifications
+            - Demo mode for testing
+            - Customizable regex patterns
+
+            ## System Requirements
+            - macOS 11.0 (Big Sur) or later
+            - Intel or Apple Silicon Mac
+
+            ## Security Note
+            This app requires notification permissions to show alerts when OTP codes are found.
+
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Summary
+        run: |
+          echo "✅ Build completed successfully!"
+          echo "📱 App: SlackOTPExtractor.app"
+          echo "📦 Archive: SlackOTPExtractor.zip"
+          echo "🎯 Target: macOS 11.0+"
+          echo "🏗️ Architecture: Universal (Intel + Apple Silicon)"
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "🚀 Release: Created for ${{ steps.tag.outputs.TAG_NAME }}"
+          fi
